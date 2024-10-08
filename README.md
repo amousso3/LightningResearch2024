@@ -11,11 +11,11 @@ Lightning Mapper dataset, and the GOES Advanced Baseline Imager dataset.
 ## Contents
 
 1. Data Collection and Preprocessing
-3. Feature Engineering (Parameter Derivation)
-4. Exploratory Data Analysis and Data Visualizations
-5. Model Development
-6. Model Evaluation
-8. Miscellaneous  
+2. Feature Engineering (Parameter Derivation)
+3. Exploratory Data Analysis and Data Visualizations
+4. Model Development
+5. Model Evaluation
+6. Miscellaneous  
 
 ## Data Collection and Preprocessing
 
@@ -24,12 +24,13 @@ Lightning Mapper dataset, and the GOES Advanced Baseline Imager dataset.
 * UMD Feng Data Sharing for GOES-GLM-GLMF
 
 ## Feature Engineering
+
 * Derived Environmental Variables
 * Parameterizations
-    * ICEFLUX
-    * Cape x Precip
-    * Cloud Top Height
-    * Updraught Mass Flux
+    ICEFLUX
+    Cape x Precip
+    Cloud Top Height
+    Updraught Mass Flux
 
 ## Exploratory Data Analysis and Data Visualizations
 

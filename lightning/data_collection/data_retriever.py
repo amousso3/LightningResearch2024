@@ -1,5 +1,4 @@
 import xarray as xr
-import pandas as pd
 import cdsapi
 import netCDF4 as nc
 from goes2go import GOES
