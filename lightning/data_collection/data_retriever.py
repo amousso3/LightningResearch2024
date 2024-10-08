@@ -1,5 +1,4 @@
 import xarray as xr
-import numpy as np
 import pandas as pd
 import cdsapi
 import netCDF4 as nc

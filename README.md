@@ -19,7 +19,17 @@ Lightning Mapper dataset, and the GOES Advanced Baseline Imager dataset.
 
 ## Data Collection and Preprocessing
 
+* Climate Data Store API request for ERA5
+* goes2go package for GOES-GLM-LCFA and GOES-ABI
+* UMD Feng Data Sharing for GOES-GLM-GLMF
+
 ## Feature Engineering
+* Derived Environmental Variables
+* Parameterizations
+    * ICEFLUX
+    * Cape x Precip
+    * Cloud Top Height
+    * Updraught Mass Flux
 
 ## Exploratory Data Analysis and Data Visualizations
 
