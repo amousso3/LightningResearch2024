@@ -49,42 +49,15 @@ FED_sum = sum(ds['Flash_extent_density'] for ds in datasets)
 
 print(FED_sum == FED_minute_5['Flash_extent_density'])
 # Conclusion: Inconclusive solely via verifying equality due to nan's and due to potential smoothing effects in the FED window not present in the minutely view
-# It is logical to assume, based on the definition of the FED window parameter, that integrated and aggregated can be interchanged in this context, so
-# summing the FED window over the hour, should be a valid method of coaresening the dataset.
+# However, it is logical to assume, based on the definition of the FED window parameter, that integrated and aggregated can be interchanged in this context, so
+# summing the FED window over the hour should be a valid method of temporally coarsening the dataset.
 
 # (b) Verifying the coordinate transformation from x and y to latitude and longitude.
+# Approach 1: Mapping the data visually (Already did this for April 20th)
+# Comparing the location of data with spots you know should have data will clue us into
+# the accuracy of the transformation, however, since this data is huge, we won't know how accurate it actually is
 
-# Let's attempt a new method of transforming coordinates
+# Approach 2: Converion and Undoing Conversion
+# The undone conversion should be close if not exactly the same as the original dataset,
+# This may also help us quantify the error propagation that comes as a result of the coordinate transformation
 
-
-def add_lat_lon(dataset):
-    # Extract the necessary projection parameters
-    projection = dataset['goes_imager_projection']
-    sat_height = projection.attrs['perspective_point_height'] + projection.attrs['semi_major_axis']
-    semi_major_axis = projection.attrs['semi_major_axis']
-    semi_minor_axis = projection.attrs['semi_minor_axis']
-    inverse_flattening = projection.attrs['inverse_flattening']
-    central_longitude = projection.attrs['longitude_of_projection_origin']
-
-    # Define the projection for GOES-R
-    proj = pyproj.Proj(proj="geos", h=sat_height, lon_0=central_longitude,
-                       a=semi_major_axis, b=semi_minor_axis, 
-                       f=1/inverse_flattening)
-
-    # Extract x and y coordinates
-    x = dataset['x'].values
-    y = dataset['y'].values
-
-    # Create meshgrid for coordinates
-    x2d, y2d = np.meshgrid(x, y)
-
-    # Transform x and y to lat/lon
-    lon, lat = proj(x2d, y2d, inverse=True)
-
-    # Add lat/lon as new DataArray variables in the dataset
-    dataset = dataset.assign_coords(lon=(['y', 'x'], lon), lat=(['y', 'x'], lat))
-    return dataset
-
-# Usage example
-ds_with_lat_lon = add_lat_lon(FED_minute_6)
-print(ds_with_lat_lon)
