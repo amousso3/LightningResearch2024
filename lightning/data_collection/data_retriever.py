@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # To retrieve the ERA5 data from the climate data store, use the cdsapi library.
 # It requires you to make an account and to have an API key, which I have already done.
 
-# There are two ERA% datasets which we are interested in, reanalysis on single levels
+# There are two ERA5 datasets which we are interested in, reanalysis on single levels
 # and reanalysis on pressure levels. The primary difference is that the data on pressure levels
 # has an extra variable which refers to the pressure levels at which the data is obtained.
 
