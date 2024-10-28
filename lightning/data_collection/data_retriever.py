@@ -26,19 +26,21 @@ pressure_lvl_variables = ['cc', 'w', 't', 'ciwc', 'q']
 
 time_list = [f"{str(hour).zfill(2)}:00" for hour in range(25)] # for if you want a day's worth of data
 
+# Boundaries [N, W, S E]
 def retrieve_era5(var: str, year: str, month: str,
                    day: str, times: str | list, boundaries: list[int], destination: str):
     if var in single_lvl_variables:
         c.retrieve(
             'reanalysis-era5-single-levels',
             {
-                'product_type': 'reanalysis',
-                'format': 'netcdf',
-                'variable': var,
-                'year': year,
-                'month': month,
-                'day': day,
-                'time': times,
+                'product_type': ['reanalysis'],
+                'data_format': 'netcdf',
+                'download_format': 'unarchived',
+                'variable': [var],
+                'year': [year],
+                'month': [month],
+                'day': [day],
+                'time': [times],
                 'area': boundaries,
             },
             destination)
@@ -46,13 +48,14 @@ def retrieve_era5(var: str, year: str, month: str,
         c.retrieve(
             'reanalysis-era5-pressure-levels',
             {
-                'product_type': 'reanalysis',
-                'format': 'netcdf',
-                'variable': var,
-                'year': year,
-                'month': month,
-                'day': day,
-                'time': times,
+                'product_type': ['reanalysis'],
+                "data_format": "netcdf",
+                "download_format": "unarchived",
+                'variable': [var],
+                'year': [year],
+                'month': [month],
+                'day': [day],
+                'time': [times],
                 'area': boundaries,
             },
             destination)

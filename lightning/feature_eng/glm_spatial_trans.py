@@ -9,6 +9,12 @@ import requests
 import numpy as np
 import netCDF4 as nc
 import os
+#import xesmf as xe
+import cdsapi
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature 
+
 
 url = "https://lightningdev.umd.edu/feng_data_sharing/113_g16_glmgrid_arch/2023/2023001/OR_GLM-L2-GLMF-M3_G16_e20230101000000.nc"
 output_path = "/home/o/oneill/mamous3/lightning/datasets"
@@ -24,6 +30,24 @@ with open(download_path, "wb") as file:
 temp_fed = xr.open_dataset(download_path)
 os.remove(download_path)
 
+dataset = "reanalysis-era5-single-levels"
+request = {
+    "product_type": ["reanalysis"],
+    "year": ["2024"],
+    "month": ["01"],
+    "day": ["01"],
+    "time": ["00:00"],
+    "data_format": "netcdf",
+    "download_format": "unarchived",
+    "variable": ["convective_available_potential_energy"],
+    "area": [45, -110, 25, -70]
+}
+
+client = cdsapi.Client()
+client.retrieve(dataset, request).download(output_path + "/era5_cape_temp.nc")
+            
+era5_ds = xr.open_dataset(output_path + "/era5_cape_temp.nc")
+os.remove(output_path + "/era5_cape_temp.nc")
 
 perspective_point_height = temp_fed.goes_imager_projection.attrs['perspective_point_height']  # in meters
 semi_major_axis = temp_fed.goes_imager_projection.attrs['semi_major_axis']  # in meters
@@ -99,4 +123,56 @@ def get_xy_from_latlon(ds, lats, lons):
 
 # The lat/lon coordinates are a 2D array because they depend on both y and x
 # Important Note: Lat/Lon data is usable unless you take a subset in an area further away from the boundaries due to NaNs
+
+temp_fed = calc_latlon(temp_fed)
+lats = (25, 45)
+lons = (-110, -70)
+((x1,x2), (y1, y2)) = get_xy_from_latlon(temp_fed, lats, lons)
+temp_fed_lat_lon = temp_fed.sel(x=slice(x1, x2), y=slice(y2, y1)) #Dataset in lat/lon box
+
+# New dataset with x and y coordinates removed, to make interpolation possible
+new_ds = xr.Dataset(
+    {
+        "Flash_extent_density": (("y", "x"), temp_fed_lat_lon.Flash_extent_density_window.data)  # Original FED data
+    },
+    coords={
+        "lat": (("y", "x"), temp_fed_lat_lon.lat.data),  # 2D latitude array
+        "lon": (("y", "x"), temp_fed_lat_lon.lon.data)   # 2D longitude array
+    }
+)
+
+# Now I'll interpolate it to the era5 grid. Note that the data itself has not changed yet, only the coordinates have. This transformation is accurate as it is the same
+# as the NOAA provided coordinate transformation found at: https://www.star.nesdis.noaa.gov/atmospheric-composition-training/python_abi_lat_lon.php 
+
+from scipy.interpolate import griddata
+
+# Flatten the 2D lat, lon, and data arrays from the original dataset because scipy interpolate does not work unless the data is in 1D
+lat_flat = new_ds.lat.values.ravel() 
+lon_flat = new_ds.lon.values.ravel()
+data_flat = new_ds.Flash_extent_density.values.ravel()
+
+# Create a meshgrid of the target lat/lon on the ERA5 grid
+target_lon, target_lat = np.meshgrid(era5_ds.longitude.values, era5_ds.latitude.values)
+
+# Interpolate using scipy's griddata
+interpolated_data = griddata(
+    points=(lon_flat, lat_flat),
+    values=data_flat,
+    xi=(target_lon, target_lat),
+    method='linear'
+)
+
+# Wrap the result back into an xarray DataArray with ERA5 coordinates
+interpolated_da = xr.DataArray(
+    interpolated_data,
+    coords={
+        "latitude": era5_ds.latitude,  # Match coordinate with era5 to ensure interpolation worked, if it didnt an error would occur here
+        "longitude": era5_ds.longitude
+    },
+    dims=["latitude", "longitude"]
+)
+
+print(interpolated_da)
+
+
 
