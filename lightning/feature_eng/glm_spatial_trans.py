@@ -163,7 +163,7 @@ interpolated_data = griddata(
 )
 
 # Wrap the result back into an xarray DataArray with ERA5 coordinates
-interpolated_da = xr.DataArray(
+interpolated_FED = xr.DataArray(
     interpolated_data,
     coords={
         "latitude": era5_ds.latitude,  # Match coordinate with era5 to ensure interpolation worked, if it didnt an error would occur here
@@ -172,7 +172,7 @@ interpolated_da = xr.DataArray(
     dims=["latitude", "longitude"]
 )
 
-print(interpolated_da)
+
 
 
 
