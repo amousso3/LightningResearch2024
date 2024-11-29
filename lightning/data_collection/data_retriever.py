@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timedelta
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import numpy as np
 
 # To retrieve the ERA5 data from the climate data store, use the cdsapi library.
 # It requires you to make an account and to have an API key, which I have already done.
@@ -15,53 +15,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # and reanalysis on pressure levels. The primary difference is that the data on pressure levels
 # has an extra variable which refers to the pressure levels at which the data is obtained.
 
-c = cdsapi.Client()
+
 # To remove the need to memorize which variables are on single levels or not,
 # this function will take in the variable nickname as input and verify the level type on its own.
 
-single_lvl_variables = ['cape', 'tp']
+import cdsapi
 
-# Cloud Cover, vertical velocity, temperature, cloud ice water content, speciic humiditiy
-pressure_lvl_variables = ['cc', 'w', 't', 'ciwc', 'q'] 
+# Variables for single-level and pressure-level datasets
+single_lvl_variables = ["total_precipitation", "convective_available_potential_energy"]
+pressure_lvl_variables = ["fraction_of_cloud_cover", "specific_cloud_ice_water_content", 
+                          "specific_humidity", "temperature", "vertical_velocity"]
 
-time_list = [f"{str(hour).zfill(2)}:00" for hour in range(25)] # for if you want a day's worth of data
+# Generate a list of times for a day's worth of data
+time_list = [f"{str(hour).zfill(2)}:00" for hour in range(24)]  # Corrected to 24 hours
 
-# Boundaries [N, W, S E]
-def retrieve_era5(var: str, year: str, month: str,
-                   day: str, times: str | list, boundaries: list[int], destination: str):
-    if var in single_lvl_variables:
-        c.retrieve(
-            'reanalysis-era5-single-levels',
-            {
-                'product_type': ['reanalysis'],
-                'data_format': 'netcdf',
-                'download_format': 'unarchived',
-                'variable': [var],
-                'year': [year],
-                'month': [month],
-                'day': [day],
-                'time': [times],
-                'area': boundaries,
-            },
-            destination)
-    elif var in pressure_lvl_variables:
-        c.retrieve(
-            'reanalysis-era5-pressure-levels',
-            {
-                'product_type': ['reanalysis'],
-                "data_format": "netcdf",
-                "download_format": "unarchived",
-                'variable': [var],
-                'year': [year],
-                'month': [month],
-                'day': [day],
-                'time': [times],
-                'area': boundaries,
-            },
-            destination)
-    else:
-        print("The variable nickname provided is not documented.")
-    return None
+# Boundaries [N, W, S, E]
 
 
 # Retrieving GOES GLM-LCFA or ABI-XXXX Data using goes2py
@@ -83,6 +51,126 @@ def retrieve_goes(var: str, start_time: str, end_time: str):
 
 # Function for downloading code using a HTTP GET request. If the file does not exist,
 # it will return None, and skip that file.
+def calc_latlon(ds):
+    # The math for this function was taken from 
+    # https://makersportal.com/blog/2018/11/25/goes-r-satellite-latitude-and-longitude-grid-projection-algorithm
+    x = ds.x
+    y = ds.y
+    
+    x,y = np.meshgrid(x,y)
+    
+    r_eq =  6378137.0
+    r_pol = 6356752.31414
+    l_0 = -75 * (np.pi/180)
+    h_sat = 35786 * 10**3
+    H = r_eq + h_sat
+    
+    a = np.sin(x)**2 + (np.cos(x)**2 * (np.cos(y)**2 + (r_eq**2 / r_pol**2) * np.sin(y)**2))
+    b = -2 * H * np.cos(x) * np.cos(y)
+    c = H**2 - r_eq**2
+    
+    r_s = (-b - np.sqrt(b**2 - 4*a*c))/(2*a)
+    
+    s_x = r_s * np.cos(x) * np.cos(y)
+    s_y = -r_s * np.sin(x)
+    s_z = r_s * np.cos(x) * np.sin(y)
+    
+    lat = np.arctan((r_eq**2 / r_pol**2) * (s_z / np.sqrt((H-s_x)**2 +s_y**2))) * (180/np.pi)
+    lon = (l_0 - np.arctan(s_y / (H-s_x))) * (180/np.pi)
+    
+    ds = ds.assign_coords({
+        "lat":(["y","x"],lat),
+        "lon":(["y","x"],lon)
+    })
+    ds.lat.attrs["units"] = "degrees_north"
+    ds.lon.attrs["units"] = "degrees_east"
+    
+    return ds
+
+def get_xy_from_latlon(ds, lats, lons):
+    """ This function takes as input a desired set of lat and lon boundaries
+        and returns the corresponding x and y coordinate boundaries.
+        This allows users to bound the dataset, which is especially useful
+        due to the fact that the data has nan lat/lon coordinates at the boundary.
+
+        >>> lats = (25, 45) #S, N
+        >>> lons = (-110, -70) # W, E
+        >>> ((x1,x2), (y1, y2)) = get_xy_from_latlon(ds, lats, lons)
+        >>> subset = ds.sel(x=slice(x1, x2), y=slice(y2, y1)) #Dataset in lat/lon box
+    """
+    lat1, lat2 = lats
+    lon1, lon2 = lons
+
+    lat = ds.lat.data
+    lon = ds.lon.data
+    
+    x = ds.x.data
+    y = ds.y.data
+    
+    x,y = np.meshgrid(x,y)
+    
+    x = x[(lat >= lat1) & (lat <= lat2) & (lon >= lon1) & (lon <= lon2)]
+    y = y[(lat >= lat1) & (lat <= lat2) & (lon >= lon1) & (lon <= lon2)] 
+    
+    return ((min(x), max(x)), (min(y), max(y)))
+
+# The lat/lon coordinates are a 2D array because they depend on both y and x
+# Important Note: Lat/Lon data is unusable unless you take a subset in an area further away from the boundaries due to NaNs
+
+# New dataset with x and y coordinates removed, to make interpolation possible
+def regrid_data(goes_ds, target_ds):
+    """ Takes as input a GOES satellite dataset (ABI or GLM) and returns a regridded, coarsened dataset
+        with coordinates of latitude and longitude. This function disregards data quality flags, as they lose
+        meaning after interpoaltion. This function assumes that the desired lat and lon indices have already been
+        sliced from the fed data.
+
+        >>> fed_ds = xr.open_dataset(file_path)
+        >>> era5_ds = xr.open_dataset(file_path)
+        >>> regridded_fed = regrid_data(fed_ds, era5_ds) 
+    """
+    new_ds = xr.Dataset(
+        {
+            "Flash_extent_density": (("y", "x"), goes_ds.data)  # Original FED data
+        },
+        coords={
+            "lat": (("y", "x"), goes_ds.lat.data),  # 2D latitude array
+            "lon": (("y", "x"), goes_ds.lon.data)   # 2D longitude array
+        }
+    )
+
+    # Now I'll interpolate it to the era5 grid. Note that the data itself has not changed yet, only the coordinates have. This transformation is accurate as it is the same
+    # as the NOAA provided coordinate transformation found at: https://www.star.nesdis.noaa.gov/atmospheric-composition-training/python_abi_lat_lon.php 
+
+    from scipy.interpolate import griddata
+
+    # Flatten the 2D lat, lon, and data arrays from the original dataset because scipy interpolate does not work unless the data is in 1D
+    lat_flat = new_ds.lat.values.ravel() 
+    lon_flat = new_ds.lon.values.ravel()
+    data_flat = new_ds.Flash_extent_density.values.ravel()
+
+    # Create a meshgrid of the target lat/lon on the ERA5 grid
+    target_lon, target_lat = np.meshgrid(target_ds.longitude.values, target_ds.latitude.values)
+
+    # Interpolate using scipy's griddata
+    interpolated_data = griddata(
+        points=(lon_flat, lat_flat),
+        values=data_flat,
+        xi=(target_lon, target_lat),
+        method='linear'
+    )
+
+    # Wrap the result back into an xarray DataArray with ERA5 coordinates
+    interpolated_da = xr.DataArray(
+        interpolated_data,
+        coords={
+            "latitude": target_ds.latitude,  # Match coordinate with era5 to ensure interpolation worked, if it didnt an error would occur here
+            "longitude": target_ds.longitude
+        },
+        dims=["latitude", "longitude"]
+    )
+
+    return interpolated_da
+
 def download_file(url, local_filename):
     try:
         with requests.get(url, stream=True) as r:
@@ -108,7 +196,7 @@ def get_fed_data_for_hour(year, day_of_year, hour):
     files = []
 
     # Start looping through the current day files
-    for minute in range(5, 60, 5):
+    for minute in range(5, 65, 5):
         time_str = (date + timedelta(minutes=minute)).strftime('%Y%m%d%H%M%S')
         file_pattern = f"OR_GLM-L2-GLMF-M3_G16_e{time_str}.nc"
         files.append(url + file_pattern)
@@ -134,7 +222,7 @@ def process_file(file_url):
         return None, file_url
 
 # This method sums the FED window for each of the 12 files within an hour.
-def aggregate_fed_hour(year, day_of_year, hour):
+def aggregate_fed_hour(year, day_of_year, hour, bounds, target):
     files = get_fed_data_for_hour(year, day_of_year, hour)
     hourly_sum = None
     faulty_links = [] # Tracking links that do not exist
@@ -163,9 +251,13 @@ def aggregate_fed_hour(year, day_of_year, hour):
             os.remove(local_file)
 
     if hourly_sum is not None:
+        hourly_sum = calc_latlon(hourly_sum)
+        ((x1,x2), (y1, y2)) = get_xy_from_latlon(hourly_sum, bounds[0], bounds[1])
+        hourly_sum = hourly_sum.sel(x=slice(x1, x2), y=slice(y2, y1))
+        hourly_sum = regrid_data(hourly_sum, target)
         hourly_sum = hourly_sum.expand_dims('time')
-        hourly_sum['time'] = [datetime(year, 1, 1) + timedelta(days=day_of_year - 1, hours=hour)]
-    
+        hourly_sum['time'] = [datetime(year, 1, 1) + timedelta(days=day_of_year - 1, hours=hour+1)]
+        
     return hourly_sum, faulty_links
 
 # Save the resulting hourly FED data to a NetCDF file
@@ -173,20 +265,21 @@ def save_fed_to_netcdf(fed_data, output_file):
     fed_data.to_netcdf(output_file)
 
 # Main function to execute the workflow for a specific day
-def retrieve_goes_glmf(date: datetime, output_file):
+def retrieve_goes_glmf(date: datetime, output_file, bounds, target):
     all_hours_data = []
     all_faulty_links = []
     year = date.year
     day_of_year = date.timetuple().tm_yday
 
     for hour in range(24):
-        hourly_fed, faulty_links = aggregate_fed_hour(year, day_of_year, hour)
+        hourly_fed, faulty_links = aggregate_fed_hour(year, day_of_year, hour, bounds, target)
         if hourly_fed is not None:
             all_hours_data.append(hourly_fed)
         all_faulty_links.extend(faulty_links)
     
     if all_hours_data:
         combined_fed = xr.concat(all_hours_data, dim='time')
+        combined_fed.name = 'FED_Window'
         save_fed_to_netcdf(combined_fed, output_file)
         print(f"Saved 24-hour FED data to {output_file}")
     else:

@@ -122,16 +122,16 @@ def get_xy_from_latlon(ds, lats, lons):
     return ((min(x), max(x)), (min(y), max(y)))
 
 # The lat/lon coordinates are a 2D array because they depend on both y and x
-# Important Note: Lat/Lon data is usable unless you take a subset in an area further away from the boundaries due to NaNs
+# Important Note: Lat/Lon data is unusable unless you take a subset in an area further away from the boundaries due to NaNs
 
 temp_fed = calc_latlon(temp_fed)
-lats = (25, 45)
-lons = (-110, -70)
+lats = (25, 45) # S, N
+lons = (-110, -70) # W, E
 ((x1,x2), (y1, y2)) = get_xy_from_latlon(temp_fed, lats, lons)
 temp_fed_lat_lon = temp_fed.sel(x=slice(x1, x2), y=slice(y2, y1)) #Dataset in lat/lon box
 
-# New dataset with x and y coordinates removed, to make interpolation possible
-new_ds = xr.Dataset(
+# New dataset with x and y coordinates removed, to make interpolation possible, this is only possible if lat and lon are of the same dimensions as the data
+fed_lat_lon = xr.Dataset(
     {
         "Flash_extent_density": (("y", "x"), temp_fed_lat_lon.Flash_extent_density_window.data)  # Original FED data
     },
@@ -146,15 +146,15 @@ new_ds = xr.Dataset(
 
 from scipy.interpolate import griddata
 
-# Flatten the 2D lat, lon, and data arrays from the original dataset because scipy interpolate does not work unless the data is in 1D
-lat_flat = new_ds.lat.values.ravel() 
-lon_flat = new_ds.lon.values.ravel()
-data_flat = new_ds.Flash_extent_density.values.ravel()
+# Flatten the 2D lat, lon, and data without making a new copy of the arrays from the original dataset because scipy interpolate does not work unless the data is in 1D
+lat_flat = fed_lat_lon.lat.values.ravel() 
+lon_flat = fed_lat_lon.lon.values.ravel()
+data_flat = fed_lat_lon.Flash_extent_density.values.ravel()
 
 # Create a meshgrid of the target lat/lon on the ERA5 grid
 target_lon, target_lat = np.meshgrid(era5_ds.longitude.values, era5_ds.latitude.values)
 
-# Interpolate using scipy's griddata
+# Interpolate using  griddata
 interpolated_data = griddata(
     points=(lon_flat, lat_flat),
     values=data_flat,
