@@ -37,13 +37,6 @@ time_list = [f"{str(hour).zfill(2)}:00" for hour in range(24)]  # Corrected to 2
 # or produce a pandas dataframe of the data for a specific range of time
 # Note that the data is recorded minutely.
 
-variable_dictionary = {'LCFA': 'GLM-L2-LCFA', 'CTH': 'ABI-L2-ACHAF', 'CTT':'ABI-L2-ACHTF','Clear Sky Mask': 'ABI-L2-ACMF',
-                        'Cloud Optical Depth': 'ABI-L2-CODF', 'Derived Stability Indicies': 'ABI-L2-DSIF',
-                        'Land Surface Temp': 'ABI-L2-LSTF', 'Rainfall Rate Estimate': 'ABI-L2-RRQPEF'} # the keys will be the variable nicknames, and the values will be the product names
-
-def retrieve_goes(var: str, start_time: str, end_time: str):
-    G = GOES(satellite=16, product=variable_dictionary[var], domain='F')
-    return xr.Dataset.from_dataframe(G.df(start= start_time, end= end_time))
 
 #######################################################################################################################
 
@@ -290,4 +283,31 @@ def retrieve_goes_glmf(date: datetime, output_file, bounds, target):
             f.write(f"{link}\n")
 
     print(f"Faulty links have been saved to faulty_links.txt")
+
+def retrieve_goes_abi(var_name, date_string, bounds, target):
+    variable_dictionary = {'LCFA': 'GLM-L2-LCFA', 'Cloud Top Height': 'ABI-L2-ACHAF', 'Cloud Top Temperature':'ABI-L2-ACHTF','Clear Sky Mask': 'ABI-L2-ACMF',
+                        'Cloud Optical Depth': 'ABI-L2-CODF', 'Derived Stability Indicies': 'ABI-L2-DSIF',
+                        'Land Surface Temp': 'ABI-L2-LSTF', 'Rainfall Rate Estimate': 'ABI-L2-RRQPEF'} # the keys will be the variable nicknames, and the values will be the product names
+
+    G = GOES(satellite=16, product=variable_dictionary[var_name], domain='F')
+    ds = xr.concat([G.nearesttime(date_string, str(hour).zfill(2) + ':00') for hour in range (0,24)], dim='t')
+    da_list = []
+    ds_all = ds[var_name]
+    for time in ds_all.t.values:
+        ds_time = ds_all.sel(t=time)  # Select data for the current time
+        ds_time = calc_latlon(ds_time)  # Apply latitude-longitude calculation
+        # Get bounding box coordinates for the region of interest
+        ((x1, x2), (y1, y2)) = get_xy_from_latlon(ds_time, bounds[0], bounds[1])
+        # Subset the data based on the bounding box
+        ds_time = ds_time.sel(x=slice(x1, x2), y=slice(y2, y1))
+        # Regrid the data to match the target dataset
+        ds_time = regrid_data(ds_time, target)
+        # Append the processed data for the current time to the list
+        da_list.append(ds_time)
+    da = xr.concat(da_list, dim='t')
+    da['t'] = target.time.values
+    da = da.rename({'t': 'time'})
+    da = da.fillna(0)
+    return da
+
 

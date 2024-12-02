@@ -5,16 +5,21 @@
 
 import xarray as xr
 import numpy as np
-import cdsapi
-import goes2go
-import sys
-import os
-# Add the parent directory of 'lightning' to the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
-from lightning.data_collection.data_retriever import retrieve_era5, retrieve_goes, single_lvl_variables, pressure_lvl_variables, time_list, retrieve_goes_glmf, variable_dictionary
 
+def romps(cape, precip):
+    return cape * precip
 
-# First we need to download the parameters from the climate data store and the goes2go package
-retrieve_era5(single_lvl_variables, '2020', '04', '19', time_list, [45, -110, 25, -70], "/home/o/oneill/mamous3/lightning/datasets/cape_precip.nc")
-retrieve_era5(pressure_lvl_variables, '2020', '04', '19', time_list, [45, -110, 25, -70], "/home/o/oneill/mamous3/lightning/datasets/ice_flux.nc")
-
+def ice_flux(q, w, t, s_h, c):
+    """Returns the ICEFLUX parameterization of lightning from the 2014 Finney Study
+        at 400 hPa.
+    """
+    p = 400*100 # Air Pressure
+    R_v = 461.5 # Gas constant for water vapor
+    R_d = 287.05 # Gas constant for Dry Air
+    T_v = t * (1 + s_h * ((R_v/R_d) -1))
+    rho = p / (R_d * T_v)
+    F = w * rho # Updraught Mass Flux at 400 hPa
+    phi = (q * F) /c #ICEFlUX Variable
+    mask = c < 0.01
+    phi = phi.where(~mask, 0)
+    return phi
