@@ -46,40 +46,54 @@ time_list = [f"{str(hour).zfill(2)}:00" for hour in range(24)]  # Corrected to 2
 # Function for downloading code using a HTTP GET request. If the file does not exist,
 # it will return None, and skip that file.
 def calc_latlon(ds):
-    # The math for this function was taken from 
-    # https://makersportal.com/blog/2018/11/25/goes-r-satellite-latitude-and-longitude-grid-projection-algorithm
-    x = ds.x
-    y = ds.y
+    """ Optimized function using Numba for computing latitude and longitude."""
+    x = ds.x.values
+    y = ds.y.values
     
-    x,y = np.meshgrid(x,y)
-    
-    r_eq =  6378137.0
-    r_pol = 6356752.31414
-    l_0 = -75 * (np.pi/180)
-    h_sat = 35786 * 10**3
+    # Earth's parameters (precomputed constants)
+    r_eq = 6378137.0  # Equatorial radius in meters
+    r_pol = 6356752.31414  # Polar radius in meters
+    l_0 = -75 * (np.pi / 180)  # Central longitude (rad)
+    h_sat = 35786 * 10**3  # Satellite altitude (meters)
     H = r_eq + h_sat
     
-    a = np.sin(x)**2 + (np.cos(x)**2 * (np.cos(y)**2 + (r_eq**2 / r_pol**2) * np.sin(y)**2))
-    b = -2 * H * np.cos(x) * np.cos(y)
-    c = H**2 - r_eq**2
-    
-    r_s = (-b - np.sqrt(b**2 - 4*a*c))/(2*a)
-    
-    s_x = r_s * np.cos(x) * np.cos(y)
-    s_y = -r_s * np.sin(x)
-    s_z = r_s * np.cos(x) * np.sin(y)
-    
-    lat = np.arctan((r_eq**2 / r_pol**2) * (s_z / np.sqrt((H-s_x)**2 +s_y**2))) * (180/np.pi)
-    lon = (l_0 - np.arctan(s_y / (H-s_x))) * (180/np.pi)
+    # Call the optimized function
+    lat, lon = _calc_latlon_numba(x, y, r_eq, r_pol, l_0, H)
     
     ds = ds.assign_coords({
-        "lat":(["y","x"],lat),
-        "lon":(["y","x"],lon)
+        "lat": ("y", "x", lat),
+        "lon": ("y", "x", lon)
     })
     ds.lat.attrs["units"] = "degrees_north"
     ds.lon.attrs["units"] = "degrees_east"
     
     return ds
+
+@njit(parallel=True)
+def _calc_latlon_numba(x, y, r_eq, r_pol, l_0, H):
+    """ Numba-optimized latitude/longitude calculation """
+    nx, ny = len(x), len(y)
+    lat = np.empty((ny, nx), dtype=np.float32)
+    lon = np.empty((ny, nx), dtype=np.float32)
+    
+    for i in prange(ny):
+        for j in prange(nx):
+            x_val, y_val = x[j], y[i]
+            
+            a = np.sin(x_val)**2 + (np.cos(x_val)**2 * (np.cos(y_val)**2 + (r_eq**2 / r_pol**2) * np.sin(y_val)**2))
+            b = -2 * H * np.cos(x_val) * np.cos(y_val)
+            c = H**2 - r_eq**2
+            
+            r_s = (-b - np.sqrt(b**2 - 4*a*c)) / (2*a)
+            
+            s_x = r_s * np.cos(x_val) * np.cos(y_val)
+            s_y = -r_s * np.sin(x_val)
+            s_z = r_s * np.cos(x_val) * np.sin(y_val)
+            
+            lat[i, j] = np.arctan((r_eq**2 / r_pol**2) * (s_z / np.sqrt((H-s_x)**2 + s_y**2))) * (180/np.pi)
+            lon[i, j] = (l_0 - np.arctan(s_y / (H-s_x))) * (180/np.pi)
+            
+    return lat, lon
 
 def get_xy_from_latlon(ds, lats, lons):
     """ This function takes as input a desired set of lat and lon boundaries
@@ -112,58 +126,48 @@ def get_xy_from_latlon(ds, lats, lons):
 # Important Note: Lat/Lon data is unusable unless you take a subset in an area further away from the boundaries due to NaNs
 
 # New dataset with x and y coordinates removed, to make interpolation possible
+@njit(parallel=True)
+def _interpolate_numba(lon_flat, lat_flat, data_flat, target_lon, target_lat):
+    """ Numba-optimized interpolation using linear approximation. """
+    interpolated_data = np.empty(target_lon.shape, dtype=np.float32)
+    
+    for i in prange(target_lon.shape[0]):
+        for j in prange(target_lon.shape[1]):
+            distances = np.sqrt((lon_flat - target_lon[i, j])**2 + (lat_flat - target_lat[i, j])**2)
+            closest_idx = np.argmin(distances)
+            interpolated_data[i, j] = data_flat[closest_idx]
+    
+    return interpolated_data
+
 def regrid_data(goes_ds, target_ds):
-    """ Takes as input a GOES satellite dataset (ABI or GLM) and returns a regridded, coarsened dataset
-        with coordinates of latitude and longitude. This function disregards data quality flags, as they lose
-        meaning after interpoaltion. This function assumes that the desired lat and lon indices have already been
-        sliced from the fed data.
-
-        >>> fed_ds = xr.open_dataset(file_path)
-        >>> era5_ds = xr.open_dataset(file_path)
-        >>> regridded_fed = regrid_data(fed_ds, era5_ds) 
-    """
-    new_ds = xr.Dataset(
-        {
-            "Flash_extent_density": (("y", "x"), goes_ds.data)  # Original FED data
-        },
-        coords={
-            "lat": (("y", "x"), goes_ds.lat.data),  # 2D latitude array
-            "lon": (("y", "x"), goes_ds.lon.data)   # 2D longitude array
-        }
-    )
-
-    # Now I'll interpolate it to the era5 grid. Note that the data itself has not changed yet, only the coordinates have. This transformation is accurate as it is the same
-    # as the NOAA provided coordinate transformation found at: https://www.star.nesdis.noaa.gov/atmospheric-composition-training/python_abi_lat_lon.php 
-
-    from scipy.interpolate import griddata
-
-    # Flatten the 2D lat, lon, and data arrays from the original dataset because scipy interpolate does not work unless the data is in 1D
-    lat_flat = new_ds.lat.values.ravel() 
-    lon_flat = new_ds.lon.values.ravel()
-    data_flat = new_ds.Flash_extent_density.values.ravel()
-
-    # Create a meshgrid of the target lat/lon on the ERA5 grid
+    """Optimized interpolation using Numba for maximum speed."""
+    # Extract original satellite data
+    lat_flat = goes_ds.lat.values.ravel()
+    lon_flat = goes_ds.lon.values.ravel()
+    data_flat = goes_ds.Flash_extent_density.values.ravel()
+    
+    # Remove NaNs from input data
+    valid_mask = ~np.isnan(data_flat)
+    lat_flat, lon_flat, data_flat = lat_flat[valid_mask], lon_flat[valid_mask], data_flat[valid_mask]
+    
+    # Generate target grid
     target_lon, target_lat = np.meshgrid(target_ds.longitude.values, target_ds.latitude.values)
-
-    # Interpolate using scipy's griddata
-    interpolated_data = griddata(
-        points=(lon_flat, lat_flat),
-        values=data_flat,
-        xi=(target_lon, target_lat),
-        method='linear'
-    )
-
-    # Wrap the result back into an xarray DataArray with ERA5 coordinates
+    
+    # Perform fast Numba-based interpolation
+    interpolated_data = _interpolate_numba(lon_flat, lat_flat, data_flat, target_lon, target_lat)
+    
+    # Wrap result into an xarray DataArray
     interpolated_da = xr.DataArray(
         interpolated_data,
         coords={
-            "latitude": target_ds.latitude,  # Match coordinate with era5 to ensure interpolation worked, if it didnt an error would occur here
+            "latitude": target_ds.latitude,
             "longitude": target_ds.longitude
         },
         dims=["latitude", "longitude"]
     )
-
+    
     return interpolated_da
+
 
 def download_file(url, local_filename):
     try:
@@ -243,7 +247,7 @@ def aggregate_fed_hour(year, day_of_year, hour, bounds, target):
         local_file = file_url.split('/')[-1]
         if os.path.exists(local_file):
             os.remove(local_file)
-    # Regrid the data on a specifc lat/lon grid
+
     if hourly_sum is not None:
         hourly_sum = calc_latlon(hourly_sum)
         ((x1,x2), (y1, y2)) = get_xy_from_latlon(hourly_sum, bounds[0], bounds[1])
