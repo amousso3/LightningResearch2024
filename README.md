@@ -2,7 +2,7 @@
 
 This repository houses the code used to answer the research question:
 
-**Assessing the regional controls of lightning in various regions**
+**Assessing the regional and temporal controls of lightning in various regions**
 
 using data collected from the ERA5 Reanalysis dataset, the GOES Geostationary
 Lightning Mapper dataset, and the GOES Advanced Baseline Imager dataset.
