@@ -255,10 +255,6 @@ def aggregate_fed_hour(year, day_of_year, hour, bounds, target):
         
     return hourly_sum, faulty_links
 
-# Save the resulting hourly FED data to a NetCDF file
-def save_fed_to_netcdf(fed_data, output_file):
-    fed_data.to_netcdf(output_file)
-
 # Main function to execute the workflow for a specific day
 def retrieve_goes_glmf(date: datetime, output_file, bounds, target):
     all_hours_data = []
@@ -275,7 +271,7 @@ def retrieve_goes_glmf(date: datetime, output_file, bounds, target):
     if all_hours_data:
         combined_fed = xr.concat(all_hours_data, dim='time')
         combined_fed.name = 'FED_Window'
-        save_fed_to_netcdf(combined_fed, output_file)
+        combined_fed.to_net_cdf(output_file)
         print(f"Saved 24-hour FED data to {output_file}")
     else:
         print("No valid data to save.")

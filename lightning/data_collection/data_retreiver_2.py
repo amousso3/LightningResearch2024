@@ -45,55 +45,66 @@ time_list = [f"{str(hour).zfill(2)}:00" for hour in range(24)]  # Corrected to 2
 
 # Function for downloading code using a HTTP GET request. If the file does not exist,
 # it will return None, and skip that file.
-def calc_latlon(ds):
-    """ Optimized function using Numba for computing latitude and longitude."""
-    x = ds.x.values
-    y = ds.y.values
-    
-    # Earth's parameters (precomputed constants)
-    r_eq = 6378137.0  # Equatorial radius in meters
-    r_pol = 6356752.31414  # Polar radius in meters
-    l_0 = -75 * (np.pi / 180)  # Central longitude (rad)
-    h_sat = 35786 * 10**3  # Satellite altitude (meters)
-    H = r_eq + h_sat
-    
-    # Call the optimized function
-    lat, lon = _calc_latlon_numba(x, y, r_eq, r_pol, l_0, H)
-    
-    ds = ds.assign_coords({
-        "lat": ("y", "x", lat),
-        "lon": ("y", "x", lon)
-    })
-    ds.lat.attrs["units"] = "degrees_north"
-    ds.lon.attrs["units"] = "degrees_east"
-    
-    return ds
-
 @njit(parallel=True)
-def _calc_latlon_numba(x, y, r_eq, r_pol, l_0, H):
-    """ Numba-optimized latitude/longitude calculation """
-    nx, ny = len(x), len(y)
-    lat = np.empty((ny, nx), dtype=np.float32)
-    lon = np.empty((ny, nx), dtype=np.float32)
+def compute_latlon(x, y):
+    """Computes lat/lon from GOES-GLM grid using numba for speed."""
     
-    for i in prange(ny):
-        for j in prange(nx):
-            x_val, y_val = x[j], y[i]
+    lat = np.zeros_like(x)
+    lon = np.zeros_like(x)
+    r_eq =  6378137.0
+    r_pol = 6356752.31414
+    l_0 = -75 * (np.pi/180)
+    h_sat = 35786 * 10**3
+    H = r_eq + h_sat
+
+
+    for i in prange(x.shape[0]):  # Parallelize over rows
+        for j in range(x.shape[1]):  # Iterate over columns
+            x_val = x[i, j]
+            y_val = y[i, j]
+
+            # Avoid unnecessary function calls
+            sin_x2 = np.sin(x_val)**2
+            cos_x2 = np.cos(x_val)**2
+            cos_y2 = np.cos(y_val)**2
+            sin_y2 = np.sin(y_val)**2 * (r_eq**2 / r_pol**2)
             
-            a = np.sin(x_val)**2 + (np.cos(x_val)**2 * (np.cos(y_val)**2 + (r_eq**2 / r_pol**2) * np.sin(y_val)**2))
+            a = sin_x2 + cos_x2 * (cos_y2 + sin_y2)
             b = -2 * H * np.cos(x_val) * np.cos(y_val)
             c = H**2 - r_eq**2
             
             r_s = (-b - np.sqrt(b**2 - 4*a*c)) / (2*a)
             
+            # Compute Cartesian coordinates
             s_x = r_s * np.cos(x_val) * np.cos(y_val)
             s_y = -r_s * np.sin(x_val)
             s_z = r_s * np.cos(x_val) * np.sin(y_val)
             
-            lat[i, j] = np.arctan((r_eq**2 / r_pol**2) * (s_z / np.sqrt((H-s_x)**2 + s_y**2))) * (180/np.pi)
-            lon[i, j] = (l_0 - np.arctan(s_y / (H-s_x))) * (180/np.pi)
-            
+            # Compute latitude and longitude
+            lat[i, j] = np.rad2deg(np.arctan((r_eq**2 / r_pol**2) * (s_z / np.sqrt((H - s_x)**2 + s_y**2))))
+            lon[i, j] = np.rad2deg(l_0 - np.arctan2(s_y, H - s_x))
+    
     return lat, lon
+
+def calc_latlon(ds):
+    # The math for this function was taken from 
+    # https://makersportal.com/blog/2018/11/25/goes-r-satellite-latitude-and-longitude-grid-projection-algorithm
+    x = ds.x
+    y = ds.y
+    
+    x,y = np.meshgrid(x,y)
+    
+    
+    lat, lon = compute_latlon(x,y)
+    
+    ds = ds.assign_coords({
+        "lat":(["y","x"],lat),
+        "lon":(["y","x"],lon)
+    })
+    ds.lat.attrs["units"] = "degrees_north"
+    ds.lon.attrs["units"] = "degrees_east"
+    
+    return ds
 
 def get_xy_from_latlon(ds, lats, lons):
     """ This function takes as input a desired set of lat and lon boundaries
@@ -126,47 +137,66 @@ def get_xy_from_latlon(ds, lats, lons):
 # Important Note: Lat/Lon data is unusable unless you take a subset in an area further away from the boundaries due to NaNs
 
 # New dataset with x and y coordinates removed, to make interpolation possible
-@njit(parallel=True)
-def _interpolate_numba(lon_flat, lat_flat, data_flat, target_lon, target_lat):
-    """ Numba-optimized interpolation using linear approximation. """
-    interpolated_data = np.empty(target_lon.shape, dtype=np.float32)
-    
-    for i in prange(target_lon.shape[0]):
-        for j in prange(target_lon.shape[1]):
-            distances = np.sqrt((lon_flat - target_lon[i, j])**2 + (lat_flat - target_lat[i, j])**2)
-            closest_idx = np.argmin(distances)
-            interpolated_data[i, j] = data_flat[closest_idx]
-    
-    return interpolated_data
-
 def regrid_data(goes_ds, target_ds):
-    """Optimized interpolation using Numba for maximum speed."""
-    # Extract original satellite data
-    lat_flat = goes_ds.lat.values.ravel()
-    lon_flat = goes_ds.lon.values.ravel()
-    data_flat = goes_ds.Flash_extent_density.values.ravel()
-    
-    # Remove NaNs from input data
-    valid_mask = ~np.isnan(data_flat)
-    lat_flat, lon_flat, data_flat = lat_flat[valid_mask], lon_flat[valid_mask], data_flat[valid_mask]
-    
-    # Generate target grid
+    """ Takes as input a GOES satellite dataset (ABI or GLM) and returns a regridded, coarsened dataset
+        with coordinates of latitude and longitude. This function disregards data quality flags, as they lose
+        meaning after interpoaltion. This function assumes that the desired lat and lon indices have already been
+        sliced from the fed data.
+
+        >>> fed_ds = xr.open_dataset(file_path)
+        >>> era5_ds = xr.open_dataset(file_path)
+        >>> regridded_fed = regrid_data(fed_ds, era5_ds) 
+    """
+    new_ds = xr.Dataset(
+        {
+            "Flash_extent_density": (("y", "x"), goes_ds.data)  # Original FED data
+        },
+        coords={
+            "lat": (("y", "x"), goes_ds.lat.data),  # 2D latitude array
+            "lon": (("y", "x"), goes_ds.lon.data)   # 2D longitude array
+        }
+    )
+
+    # Now I'll interpolate it to the era5 grid. Note that the data itself has not changed yet, only the coordinates have. This transformation is accurate as it is the same
+    # as the NOAA provided coordinate transformation found at: https://www.star.nesdis.noaa.gov/atmospheric-composition-training/python_abi_lat_lon.php 
+
+    from scipy.interpolate import griddata
+
+    # Flatten the 2D lat, lon, and data arrays from the original dataset because scipy interpolate does not work unless the data is in 1D
+    lat_flat = new_ds.lat.values.ravel() 
+    lon_flat = new_ds.lon.values.ravel()
+    data_flat = new_ds.Flash_extent_density.values.ravel()
+
+    # Create a meshgrid of the target lat/lon on the ERA5 grid
     target_lon, target_lat = np.meshgrid(target_ds.longitude.values, target_ds.latitude.values)
-    
-    # Perform fast Numba-based interpolation
-    interpolated_data = _interpolate_numba(lon_flat, lat_flat, data_flat, target_lon, target_lat)
-    
-    # Wrap result into an xarray DataArray
+
+    # Interpolate using scipy's griddata
+    interpolated_data = griddata(
+        points=(lon_flat, lat_flat),
+        values=data_flat,
+        xi=(target_lon, target_lat),
+        method='linear'
+    )
+
+    # Wrap the result back into an xarray DataArray with ERA5 coordinates
     interpolated_da = xr.DataArray(
         interpolated_data,
         coords={
-            "latitude": target_ds.latitude,
+            "latitude": target_ds.latitude,  # Match coordinate with era5 to ensure interpolation worked, if it didnt an error would occur here
             "longitude": target_ds.longitude
         },
         dims=["latitude", "longitude"]
     )
-    
+
     return interpolated_da
+
+def interp_to_grid(fed_hour, bounds, target):
+    fed_hour = calc_latlon(fed_hour)
+    ((x1,x2), (y1, y2)) = get_xy_from_latlon(fed_hour, bounds[0], bounds[1])
+    fed_hour = fed_hour.sel(x=slice(x1, x2), y=slice(y2, y1))
+    fed_hour = regrid_data(fed_hour, target)
+    fed_hour = fed_hour.fillna(0)
+    return None
 
 
 def download_file(url, local_filename):
@@ -220,7 +250,7 @@ def process_file(file_url):
         return None, file_url
 
 # This method sums the FED window for each of the 12 files within an hour.
-def aggregate_fed_hour(year, day_of_year, hour, bounds, target):
+def aggregate_fed_hour(year, day_of_year, hour):
     files = get_fed_data_for_hour(year, day_of_year, hour)
     hourly_sum = None
     faulty_links = [] # Tracking links that do not exist
@@ -247,31 +277,23 @@ def aggregate_fed_hour(year, day_of_year, hour, bounds, target):
         local_file = file_url.split('/')[-1]
         if os.path.exists(local_file):
             os.remove(local_file)
-
+    # Regrid the data on a specifc lat/lon grid
     if hourly_sum is not None:
-        hourly_sum = calc_latlon(hourly_sum)
-        ((x1,x2), (y1, y2)) = get_xy_from_latlon(hourly_sum, bounds[0], bounds[1])
-        hourly_sum = hourly_sum.sel(x=slice(x1, x2), y=slice(y2, y1))
-        hourly_sum = regrid_data(hourly_sum, target)
-        hourly_sum = hourly_sum.fillna(0)
         hourly_sum = hourly_sum.expand_dims('time')
         hourly_sum['time'] = [datetime(year, 1, 1) + timedelta(days=day_of_year - 1, hours=hour+1)]
         
     return hourly_sum, faulty_links
 
-# Save the resulting hourly FED data to a NetCDF file
-def save_fed_to_netcdf(fed_data, output_file):
-    fed_data.to_netcdf(output_file)
 
 # Main function to execute the workflow for a specific day
-def retrieve_goes_glmf(date: datetime, output_file, bounds, target):
+def retrieve_goes_glmf(date: datetime, output_file):
     all_hours_data = []
     all_faulty_links = []
     year = date.year
     day_of_year = date.timetuple().tm_yday
 
     for hour in range(24):
-        hourly_fed, faulty_links = aggregate_fed_hour(year, day_of_year, hour, bounds, target)
+        hourly_fed, faulty_links = aggregate_fed_hour(year, day_of_year, hour)
         if hourly_fed is not None:
             all_hours_data.append(hourly_fed)
         all_faulty_links.extend(faulty_links)
@@ -279,7 +301,7 @@ def retrieve_goes_glmf(date: datetime, output_file, bounds, target):
     if all_hours_data:
         combined_fed = xr.concat(all_hours_data, dim='time')
         combined_fed.name = 'FED_Window'
-        save_fed_to_netcdf(combined_fed, output_file)
+        combined_fed.to_net_cdf(output_file)
         print(f"Saved 24-hour FED data to {output_file}")
     else:
         print("No valid data to save.")
