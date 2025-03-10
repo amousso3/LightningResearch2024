@@ -6,13 +6,15 @@ import requests
 from datetime import datetime, timedelta
 import os
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import numpy as np
 from numba import njit, prange
 from scipy.interpolate import griddata
 from scipy.spatial import cKDTree
 import multiprocessing
+import dask
+from dask import delayed, compute
+from datetime import datetime, timedelta
 # To retrieve the ERA5 data from the climate data store, use the cdsapi library.
 # It requires you to make an account and to have an API key, which I have already done.
 
@@ -24,7 +26,6 @@ import multiprocessing
 # To remove the need to memorize which variables are on single levels or not,
 # this function will take in the variable nickname as input and verify the level type on its own.
 
-import cdsapi
 
 # Variables for single-level and pressure-level datasets
 single_lvl_variables = ["total_precipitation", "convective_available_potential_energy"]
@@ -214,7 +215,7 @@ def download_file(url, local_filename, chunk_size=64*1024):
         print(f"Error downloading file {url}: {e}")
         return None
 
-def download_files_parallel(file_urls, num_workers=6):
+def download_files_parallel(file_urls, num_workers):
     """Download multiple files in parallel."""
     local_filenames = [url.split("/")[-1] for url in file_urls]  # Extract filenames
 
@@ -265,7 +266,7 @@ def aggregate_fed_hour(year, day_of_year, hour):
     faulty_links = [] # Tracking links that do not exist
 
     print(f"Processing files for year {year}, day {day_of_year}, hour {hour}")
-    downloaded_files = download_files_parallel(files, num_workers=6)
+    downloaded_files = download_files_parallel(files, num_workers=8)
     
     downloaded_files = [f for f in downloaded_files if f is not None]
     if not downloaded_files:
@@ -273,7 +274,7 @@ def aggregate_fed_hour(year, day_of_year, hour):
         return None, []
     
     # Using parallel computing library to carry out aggregation operation simultaneously.
-    with ProcessPoolExecutor(max_workers=6) as executor:
+    with ProcessPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(process_file, file_url): file_url for file_url in downloaded_files}
 
         for future in as_completed(futures):
@@ -290,7 +291,7 @@ def aggregate_fed_hour(year, day_of_year, hour):
     if hourly_sum is not None:
         hourly_sum = xr.DataArray(hourly_sum, coords=fed_window.coords, dims=fed_window.dims, attrs=fed_window.attrs)
         hourly_sum = hourly_sum.expand_dims('time')
-        hourly_sum['time'] = [datetime(year, 1, 1) + timedelta(days=day_of_year - 1, hours=hour+1)]
+        hourly_sum['time'] = [datetime(year, 1, 1) + timedelta(days=day_of_year - 1, hours=hour)]
   
     # Delete files after processing
     for file_url in files:
@@ -309,7 +310,7 @@ def retrieve_goes_glmf(date: datetime, output_file):
     day_of_year = date.timetuple().tm_yday
 
     # Process all 24 hours in parallel
-    with ProcessPoolExecutor(max_workers=6) as executor:
+    with ProcessPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(aggregate_fed_hour, year, day_of_year, hour): hour for hour in range(24)}
 
         for future in as_completed(futures):
@@ -343,5 +344,3 @@ def retrieve_goes_abi(var_name, date_string, target):
     ds['t'] = target.time.values
     ds = ds.rename({'t': 'time'})
     return ds
-
-
