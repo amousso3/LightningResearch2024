@@ -376,10 +376,6 @@ def retrieve_goes_abi_range(var_name, start_date, end_date, target):
     combined['time'] = target.time.values  # Match time dimension if needed
     return combined
 
-import os
-from datetime import timedelta
-import cdsapi
-import xarray as xr
 
 def download_and_merge_era5(start_date, end_date, lat_bounds, lon_bounds, output_dir):
     """
@@ -405,9 +401,8 @@ def download_and_merge_era5(start_date, end_date, lat_bounds, lon_bounds, output
         pressure_path = os.path.join(output_dir, f"pressure_{ymd}.nc")
         single_path = os.path.join(output_dir, f"single_{ymd}.nc")
 
-        # --- Download Pressure-Level Data ---
         if not os.path.exists(pressure_path):
-            print(f"📥 Downloading pressure-level for {ymd}")
+            print(f"Downloading pressure-level for {ymd}")
             client.retrieve("reanalysis-era5-pressure-levels", {
                 "product_type": "reanalysis",
                 "format": "netcdf",
@@ -426,9 +421,8 @@ def download_and_merge_era5(start_date, end_date, lat_bounds, lon_bounds, output
                 "area": area
             }).download(pressure_path)
         
-        # --- Download Single-Level Data ---
         if not os.path.exists(single_path):
-            print(f"📥 Downloading single-level for {ymd}")
+            print(f"Downloading single-level for {ymd}")
             client.retrieve("reanalysis-era5-single-levels", {
                 "product_type": "reanalysis",
                 "format": "netcdf",
@@ -443,7 +437,6 @@ def download_and_merge_era5(start_date, end_date, lat_bounds, lon_bounds, output
                 "area": area
             }).download(single_path)
 
-        # Track downloaded files
         if os.path.exists(pressure_path):
             pressure_files.append(pressure_path)
         if os.path.exists(single_path):
@@ -451,14 +444,13 @@ def download_and_merge_era5(start_date, end_date, lat_bounds, lon_bounds, output
 
         date += timedelta(days=1)
 
-    # --- Merge All Files ---
-    print("📚 Merging pressure-level data...")
+    print("Merging pressure-level data...")
     ds_pressure = xr.open_mfdataset(pressure_files, combine="by_coords", engine="netcdf4", parallel=True)
 
-    print("📚 Merging single-level data...")
+    print("Merging single-level data...")
     ds_single = xr.open_mfdataset(single_files, combine="by_coords", engine="netcdf4", parallel=True)
 
-    print("🔗 Final merge...")
+    print("Final merge...")
     ds_merged = xr.merge([ds_pressure, ds_single])
 
     return ds_merged
