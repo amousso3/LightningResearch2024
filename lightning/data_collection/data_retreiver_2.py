@@ -50,6 +50,8 @@ time_list = [f"{str(hour).zfill(2)}:00" for hour in range(24)]  # Corrected to 2
 
 # Function for downloading code using a HTTP GET request. If the file does not exist,
 # it will return None, and skip that file.
+SCRATCH_DIR = "/scratch/o/oneill/mamous3"
+os.makedirs(SCRATCH_DIR, exist_ok=True)  # Make sure it exists
 
 # Numba speeds up these types of computations significantly, so I used their JIT calculations
 @njit(parallel=True)
@@ -204,25 +206,27 @@ def parallel_interp(goes_ds_path, bounds, target_ds, num_workers=16):
 
 
 def download_file(url, local_filename, chunk_size=64*1024):
+    local_path = os.path.join(SCRATCH_DIR, local_filename)
     try:
         with requests.get(url, stream=True, timeout=15) as r:
             r.raise_for_status()
-            with open(local_filename, 'wb') as f:
+            with open(local_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=chunk_size):
                     f.write(chunk)
-        return local_filename
+        return local_path
     except Exception as e:
         print(f"Error downloading file {url}: {e}")
         return None
 
-def download_files_parallel(file_urls, num_workers):
-    """Download multiple files in parallel."""
-    local_filenames = [url.split("/")[-1] for url in file_urls]  # Extract filenames
 
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        results = list(executor.map(download_file, file_urls, local_filenames))  # Pass URLs & filenames
+def download_files_parallel(file_urls, num_workers):
+    local_filenames = [url.split("/")[-1] for url in file_urls]
     
-    return results
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        results = list(executor.map(download_file, file_urls, local_filenames))
+    
+    return results  # These are full paths in SCRATCH
+
 
 # Using the FED Window we can go from downloading 60 files to only 12 files, and since that is a low number of files,
 # we can process all of their data, and once we are done processing the data for each hour, we can delete the files.
@@ -247,17 +251,15 @@ def get_fed_data_for_hour(year, day_of_year, hour):
 # This function uses the URL of the file from the website to get the name of the file as the
 # final index of the link string is the GLM file name. We run try and except to handle any missing file errors.
 # We then acquire the FED over the 5-minute window in each file which will later be summed for the hour.
-def process_file(file_url):
-    """Processes a single NetCDF file."""
-    local_file = file_url.split('/')[-1]  # Extract filename
-
+def process_file(file_path):
     try:
-        with xr.open_dataset(local_file, decode_times=False) as ds:
-            fed_window = ds['Flash_extent_density_window'].load()  # Load into memory
+        with xr.open_dataset(file_path, decode_times=False) as ds:
+            fed_window = ds['Flash_extent_density_window'].load()
         return fed_window, None
     except Exception as e:
-        print(f"Error processing file {file_url}: {e}")
-        return None, file_url
+        print(f"Error processing file {file_path}: {e}")
+        return None, file_path
+
 
 # This function sums the FED window for each of the 12 files within an hour.
 def aggregate_fed_hour(year, day_of_year, hour):
@@ -294,11 +296,9 @@ def aggregate_fed_hour(year, day_of_year, hour):
         hourly_sum['time'] = [datetime(year, 1, 1) + timedelta(days=day_of_year - 1, hours=hour)]
   
     # Delete files after processing
-    for file_url in files:
-        local_file = file_url.split('/')[-1]
+    for local_file in downloaded_files:
         if os.path.exists(local_file):
             os.remove(local_file)
-        
     return hourly_sum, faulty_links
 
 
@@ -333,14 +333,132 @@ def retrieve_goes_glmf(date: datetime, output_file):
 
     print(f"Faulty links have been saved to faulty_links.txt")
 
-def retrieve_goes_abi(var_name, date_string, target):
-    variable_dictionary = {'LCFA': 'GLM-L2-LCFA', 'HT': 'ABI-L2-ACHAF', 'TEMP':'ABI-L2-ACHTF','Clear Sky Mask': 'ABI-L2-ACMF',
-                        'Cloud Optical Depth': 'ABI-L2-CODF', 'CAPE': 'ABI-L2-DSIF',
-                        'Land Surface Temp': 'ABI-L2-LSTF', 'RRQPE': 'ABI-L2-RRQPEF'} # the keys will be the variable nicknames, and the values will be the product names
+def retrieve_goes_abi_range(var_name, start_date, end_date, target):
+    """
+    Retrieve GOES ABI variable over a date range and align with target time dimension.
+    
+    Parameters:
+    - var_name: e.g., "HT", "TEMP", "CAPE", etc.
+    - start_date, end_date: datetime objects
+    - target: xarray.Dataset with the desired time dimension
+    
+    Returns:
+    - Merged xarray.Dataset of ABI variable across date range
+    """
+    variable_dictionary = {
+        'LCFA': 'GLM-L2-LCFA', 'HT': 'ABI-L2-ACHAF', 'TEMP': 'ABI-L2-ACHTF',
+        'Clear Sky Mask': 'ABI-L2-ACMF', 'Cloud Optical Depth': 'ABI-L2-CODF',
+        'CAPE': 'ABI-L2-DSIF', 'Land Surface Temp': 'ABI-L2-LSTF', 'RRQPE': 'ABI-L2-RRQPEF'
+    }
 
     G = GOES(satellite=16, product=variable_dictionary[var_name], domain='F')
-    ds = xr.concat([G.nearesttime(f"{date_string} {str(hour).zfill(2)}:00") for hour in range(0, 24)], dim='t')    
-    ds = ds[var_name].fillna(0)
-    ds['t'] = target.time.values
-    ds = ds.rename({'t': 'time'})
-    return ds
+    all_data = []
+
+    current = start_date
+    while current <= end_date:
+        for hour in range(24):
+            time_str = f"{current.strftime('%Y-%m-%d')} {str(hour).zfill(2)}:00"
+            try:
+                ds = G.nearesttime(time_str)
+                if var_name in ds:
+                    da = ds[var_name].fillna(0)
+                    da = da.expand_dims(time=[datetime(current.year, current.month, current.day, hour)])
+                    all_data.append(da)
+            except Exception as e:
+                print(f"⚠️ Failed to retrieve {var_name} at {time_str}: {e}")
+        current += timedelta(days=1)
+
+    if not all_data:
+        print("No data retrieved.")
+        return None
+
+    combined = xr.concat(all_data, dim='time')
+    combined['time'] = target.time.values  # Match time dimension if needed
+    return combined
+
+import os
+from datetime import timedelta
+import cdsapi
+import xarray as xr
+
+def download_and_merge_era5(start_date, end_date, lat_bounds, lon_bounds, output_dir):
+    """
+    Downloads ERA5 data (pressure-level and single-level) and merges into a single xarray.Dataset.
+    """
+
+    os.makedirs(output_dir, exist_ok=True)
+    client = cdsapi.Client()
+
+    date = start_date
+    pressure_files = []
+    single_files = []
+
+    while date <= end_date:
+        ymd = date.strftime("%Y%m%d")
+        year = date.strftime("%Y")
+        month = date.strftime("%m")
+        day = date.strftime("%d")
+        times = [f"{h:02d}:00" for h in range(24)]
+        area = [lat_bounds[1], lon_bounds[0], lat_bounds[0], lon_bounds[1]]  # N, W, S, E
+
+        # Paths
+        pressure_path = os.path.join(output_dir, f"pressure_{ymd}.nc")
+        single_path = os.path.join(output_dir, f"single_{ymd}.nc")
+
+        # --- Download Pressure-Level Data ---
+        if not os.path.exists(pressure_path):
+            print(f"📥 Downloading pressure-level for {ymd}")
+            client.retrieve("reanalysis-era5-pressure-levels", {
+                "product_type": "reanalysis",
+                "format": "netcdf",
+                "pressure_level": ["450"],
+                "variable": [
+                    "fraction_of_cloud_cover",
+                    "specific_cloud_ice_water_content",
+                    "specific_humidity",
+                    "temperature",
+                    "vertical_velocity"
+                ],
+                "year": year,
+                "month": month,
+                "day": day,
+                "time": times,
+                "area": area
+            }).download(pressure_path)
+        
+        # --- Download Single-Level Data ---
+        if not os.path.exists(single_path):
+            print(f"📥 Downloading single-level for {ymd}")
+            client.retrieve("reanalysis-era5-single-levels", {
+                "product_type": "reanalysis",
+                "format": "netcdf",
+                "variable": [
+                    "total_precipitation",
+                    "convective_available_potential_energy"
+                ],
+                "year": year,
+                "month": month,
+                "day": day,
+                "time": times,
+                "area": area
+            }).download(single_path)
+
+        # Track downloaded files
+        if os.path.exists(pressure_path):
+            pressure_files.append(pressure_path)
+        if os.path.exists(single_path):
+            single_files.append(single_path)
+
+        date += timedelta(days=1)
+
+    # --- Merge All Files ---
+    print("📚 Merging pressure-level data...")
+    ds_pressure = xr.open_mfdataset(pressure_files, combine="by_coords", engine="netcdf4", parallel=True)
+
+    print("📚 Merging single-level data...")
+    ds_single = xr.open_mfdataset(single_files, combine="by_coords", engine="netcdf4", parallel=True)
+
+    print("🔗 Final merge...")
+    ds_merged = xr.merge([ds_pressure, ds_single])
+
+    return ds_merged
